@@ -1,0 +1,12 @@
+Import editorkit
+
+Sub Main()
+    Dim document As New EditorDocument("Hello 😀\r\nBuoy Studio\n")
+    Dim emojiByte As Integer = document.PositionToByte(0, 6)
+    document.ReplaceRange(emojiByte, document.PositionToByte(0, 8), "🌍")
+    Print document.Text
+    Print "Version: " + String.From(document.Version)
+    Print "Unsaved changes: " + String.From(document.IsDirty)
+    document.Undo()
+    Print "After undo: " + document.LineText(0)
+End Sub

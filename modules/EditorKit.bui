@@ -1,0 +1,325 @@
+' In-memory document primitives. Confine a document to one thread.
+
+Private Function UTF8Width(data As Bytes, offset As Integer) As Integer
+    Dim first As Integer = data.Item(offset)
+    Dim width As Integer = 0
+    If first < 128 Then
+        Return 1
+    ElseIf first >= 194 And first <= 223 Then
+        width = 2
+    ElseIf first >= 224 And first <= 239 Then
+        width = 3
+    ElseIf first >= 240 And first <= 244 Then
+        width = 4
+    Else
+        Throw New InvalidArgumentException("Malformed UTF-8 text")
+    End If
+    If offset + width > data.Count Then Throw New InvalidArgumentException("Truncated UTF-8 text")
+    For i As Integer = 1 To width - 1
+        Dim continuation As Integer = data.Item(offset + i)
+        If continuation < 128 Or continuation > 191 Then Throw New InvalidArgumentException("Malformed UTF-8 continuation")
+    Next
+    Dim second As Integer = data.Item(offset + 1)
+    If first = 224 And second < 160 Then Throw New InvalidArgumentException("Overlong UTF-8 sequence")
+    If first = 237 And second >= 160 Then Throw New InvalidArgumentException("UTF-8 surrogate")
+    If first = 240 And second < 144 Then Throw New InvalidArgumentException("Overlong UTF-8 sequence")
+    If first = 244 And second >= 144 Then Throw New InvalidArgumentException("UTF-8 codepoint exceeds Unicode range")
+    Return width
+End Function
+
+Private Sub AppendRange(target As Bytes, source As Bytes, startByte As Integer, endByte As Integer)
+    For i As Integer = startByte To endByte - 1
+        target.Append(source.Item(i))
+    Next
+End Sub
+
+Private Class EditorSnapshot
+    Public Property Content As String
+    Public Property Data As Bytes
+    Public Property Starts As Array Of Integer = []
+    Public Property Ends As Array Of Integer = []
+
+    Public Sub Constructor(content As String)
+        Me.Content = content
+        Me.Data = Bytes.FromString(content, Text.Encodings.UTF8)
+        Array.Append(Me.Starts, 0)
+        Dim offset As Integer = 0
+        While offset < Me.Data.Count
+            Dim width As Integer = UTF8Width(Me.Data, offset)
+            Dim first As Integer = Me.Data.Item(offset)
+            If first = 13 Or first = 10 Then
+                Array.Append(Me.Ends, offset)
+                If first = 13 And offset + 1 < Me.Data.Count Then
+                    If Me.Data.Item(offset + 1) = 10 Then offset += 1
+                End If
+                offset += 1
+                Array.Append(Me.Starts, offset)
+            Else
+                offset += width
+            End If
+        End While
+        Array.Append(Me.Ends, Me.Data.Count)
+    End Sub
+
+    Public Sub RequireBoundary(offset As Integer)
+        If offset < 0 Or offset > Me.Data.Count Then Throw New InvalidArgumentException("Byte offset outside document")
+        If offset = Me.Data.Count Then Return
+        Dim value As Integer = Me.Data.Item(offset)
+        If value >= 128 And value <= 191 Then Throw New InvalidArgumentException("Byte offset splits a UTF-8 codepoint")
+        If offset > 0 And value = 10 Then
+            If Me.Data.Item(offset - 1) = 13 Then Throw New InvalidArgumentException("Byte offset splits CRLF")
+        End If
+    End Sub
+
+    Public Sub RequireLine(lineIndex As Integer)
+        If lineIndex < 0 Or lineIndex >= Array.Count(Me.Starts) Then Throw New InvalidArgumentException("Line outside document")
+    End Sub
+End Class
+
+''' A zero-based line/UTF-16 code-unit position, compatible with LSP's default encoding.
+Public Class EditorPosition
+    Private Property mLine As Integer
+    Private Property mCharacter As Integer
+
+    Public Sub Constructor(lineIndex As Integer, characterIndex As Integer)
+        If lineIndex < 0 Or characterIndex < 0 Then Throw New InvalidArgumentException("Negative document position")
+        Me.mLine = lineIndex
+        Me.mCharacter = characterIndex
+    End Sub
+
+    Public Property Line As Integer
+        Get
+            Return Me.mLine
+        End Get
+    End Property
+
+    Public Property Character As Integer
+        Get
+            Return Me.mCharacter
+        End Get
+    End Property
+End Class
+
+''' A replacement of the half-open UTF-8 byte range [StartByte, EndByte).
+Public Class EditorEdit
+    Private Property mStart As Integer
+    Private Property mEnd As Integer
+    Private Property mReplacement As String
+
+    Public Sub Constructor(startByte As Integer, endByte As Integer, replacement As String)
+        If startByte < 0 Or endByte < startByte Then Throw New InvalidArgumentException("Invalid edit range")
+        Me.mStart = startByte
+        Me.mEnd = endByte
+        Me.mReplacement = replacement
+    End Sub
+
+    Public Property StartByte As Integer
+        Get
+            Return Me.mStart
+        End Get
+    End Property
+
+    Public Property EndByte As Integer
+        Get
+            Return Me.mEnd
+        End Get
+    End Property
+
+    Public Property Replacement As String
+        Get
+            Return Me.mReplacement
+        End Get
+    End Property
+End Class
+
+''' A contiguous text document with transactional edits and bounded snapshot history.
+Public Class EditorDocument
+    Private Property mSnapshot As EditorSnapshot
+    Private Property mSaved As String
+    Private Property mVersion As Integer = 1
+    Private Property mHistoryLimit As Integer
+    Private Property mUndo As Array Of EditorSnapshot = []
+    Private Property mRedo As Array Of EditorSnapshot = []
+
+    Public Sub Constructor(content As String = "", historyLimit As Integer = 100)
+        If historyLimit < 0 Then Throw New InvalidArgumentException("Negative history limit")
+        Me.mSnapshot = New EditorSnapshot(content)
+        Me.mSaved = content
+        Me.mHistoryLimit = historyLimit
+    End Sub
+
+    Public Property Text As String
+        Get
+            Return Me.mSnapshot.Content
+        End Get
+    End Property
+
+    Public Property ByteLength As Integer
+        Get
+            Return Me.mSnapshot.Data.Count
+        End Get
+    End Property
+
+    Public Property LineCount As Integer
+        Get
+            Return Array.Count(Me.mSnapshot.Starts)
+        End Get
+    End Property
+
+    Public Property Version As Integer
+        Get
+            Return Me.mVersion
+        End Get
+    End Property
+
+    Public Property IsDirty As Boolean
+        Get
+            Return String.Compare(Me.mSnapshot.Content, Me.mSaved, True) <> 0
+        End Get
+    End Property
+
+    Public Property CanUndo As Boolean
+        Get
+            Return Array.Count(Me.mUndo) > 0
+        End Get
+    End Property
+
+    Public Property CanRedo As Boolean
+        Get
+            Return Array.Count(Me.mRedo) > 0
+        End Get
+    End Property
+
+    Public Sub MarkSaved()
+        Me.mSaved = Me.mSnapshot.Content
+    End Sub
+
+    Public Sub ClearHistory()
+        Array.Clear(Me.mUndo)
+        Array.Clear(Me.mRedo)
+    End Sub
+
+    Public Function LineStartByte(lineIndex As Integer) As Integer
+        Me.mSnapshot.RequireLine(lineIndex)
+        Return Me.mSnapshot.Starts(lineIndex)
+    End Function
+
+    Public Function LineEndByte(lineIndex As Integer) As Integer
+        Me.mSnapshot.RequireLine(lineIndex)
+        Return Me.mSnapshot.Ends(lineIndex)
+    End Function
+
+    Public Function LineText(lineIndex As Integer) As String
+        Me.mSnapshot.RequireLine(lineIndex)
+        Dim data As New Bytes()
+        AppendRange(data, Me.mSnapshot.Data, Me.mSnapshot.Starts(lineIndex), Me.mSnapshot.Ends(lineIndex))
+        Return data.ToString(Text.Encodings.UTF8)
+    End Function
+
+    Public Function ByteToPosition(byteOffset As Integer) As EditorPosition
+        Me.mSnapshot.RequireBoundary(byteOffset)
+        Dim low As Integer = 0
+        Dim high As Integer = Me.LineCount - 1
+        While low < high
+            Dim middle As Integer = (low + high + 1) \ 2
+            If Me.mSnapshot.Starts(middle) <= byteOffset Then
+                low = middle
+            Else
+                high = middle - 1
+            End If
+        End While
+        Dim offset As Integer = Me.mSnapshot.Starts(low)
+        Dim units As Integer = 0
+        While offset < byteOffset
+            Dim width As Integer = UTF8Width(Me.mSnapshot.Data, offset)
+            If width = 4 Then
+                units += 2
+            Else
+                units += 1
+            End If
+            offset += width
+        End While
+        Return New EditorPosition(low, units)
+    End Function
+
+    Public Function PositionToByte(lineIndex As Integer, characterIndex As Integer) As Integer
+        Me.mSnapshot.RequireLine(lineIndex)
+        If characterIndex < 0 Then Throw New InvalidArgumentException("Negative UTF-16 character offset")
+        Dim offset As Integer = Me.mSnapshot.Starts(lineIndex)
+        Dim endByte As Integer = Me.mSnapshot.Ends(lineIndex)
+        Dim units As Integer = 0
+        While offset < endByte And units < characterIndex
+            Dim width As Integer = UTF8Width(Me.mSnapshot.Data, offset)
+            Dim extra As Integer = 1
+            If width = 4 Then extra = 2
+            If units + extra > characterIndex Then Throw New InvalidArgumentException("Position splits a UTF-16 surrogate pair")
+            units += extra
+            offset += width
+        End While
+        If units <> characterIndex Then Throw New InvalidArgumentException("UTF-16 position exceeds line length")
+        Return offset
+    End Function
+
+    Public Function ReplaceRange(startByte As Integer, endByte As Integer, replacement As String) As Boolean
+        Dim edits As Array Of EditorEdit = [New EditorEdit(startByte, endByte, replacement)]
+        Return Me.ApplyEdits(edits)
+    End Function
+
+    ''' All ranges refer to the original snapshot. Input order does not matter.
+    Public Function ApplyEdits(edits As Array Of EditorEdit) As Boolean
+        Dim count As Integer = Array.Count(edits)
+        If count = 0 Then Return False
+        If count > 4096 Then Throw New InvalidArgumentException("A transaction is limited to 4096 edits")
+        Dim ordered As Array Of EditorEdit = []
+        For Each item As EditorEdit In edits
+            If item = Nil Then Throw New InvalidArgumentException("Nil edit")
+            Me.mSnapshot.RequireBoundary(item.StartByte)
+            Me.mSnapshot.RequireBoundary(item.EndByte)
+            Dim insertAt As Integer = Array.Count(ordered)
+            While insertAt > 0
+                If ordered(insertAt - 1).StartByte <= item.StartByte Then Exit While
+                insertAt -= 1
+            End While
+            Array.Insert(ordered, insertAt, item)
+        Next
+        For i As Integer = 1 To count - 1
+            If ordered(i).StartByte < ordered(i - 1).EndByte Or ordered(i).StartByte = ordered(i - 1).StartByte Then Throw New InvalidArgumentException("Overlapping or ambiguous edit ranges")
+        Next
+        Dim combined As New Bytes()
+        Dim copied As Integer = 0
+        For Each item As EditorEdit In ordered
+            AppendRange(combined, Me.mSnapshot.Data, copied, item.StartByte)
+            combined.Append(Bytes.FromString(item.Replacement, Text.Encodings.UTF8))
+            copied = item.EndByte
+        Next
+        AppendRange(combined, Me.mSnapshot.Data, copied, Me.ByteLength)
+        Dim candidate As New EditorSnapshot(combined.ToString(Text.Encodings.UTF8))
+        If String.Compare(candidate.Content, Me.mSnapshot.Content, True) = 0 Then Return False
+        If Me.mHistoryLimit > 0 Then
+            Array.Append(Me.mUndo, Me.mSnapshot)
+            If Array.Count(Me.mUndo) > Me.mHistoryLimit Then Array.RemoveAt(Me.mUndo, 0)
+        End If
+        Array.Clear(Me.mRedo)
+        Me.mSnapshot = candidate
+        Me.mVersion += 1
+        Return True
+    End Function
+
+    Public Function Undo() As Boolean
+        If Not Me.CanUndo Then Return False
+        Array.Append(Me.mRedo, Me.mSnapshot)
+        Me.mSnapshot = Array.Last(Me.mUndo)
+        Array.RemoveAt(Me.mUndo, Array.Count(Me.mUndo) - 1)
+        Me.mVersion += 1
+        Return True
+    End Function
+
+    Public Function Redo() As Boolean
+        If Not Me.CanRedo Then Return False
+        Array.Append(Me.mUndo, Me.mSnapshot)
+        Me.mSnapshot = Array.Last(Me.mRedo)
+        Array.RemoveAt(Me.mRedo, Array.Count(Me.mRedo) - 1)
+        Me.mVersion += 1
+        Return True
+    End Function
+End Class

@@ -90,9 +90,3 @@ Confine each document to one thread or synchronize access externally. This
 package does not provide a rope, grapheme-aware cursor movement, multi-caret UI,
 syntax colors, disk persistence, collaborative editing or automatic LSP version
 synchronization. It is an independently reusable model beneath those features.
-
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

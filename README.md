@@ -1,6 +1,6 @@
-# Unicode text editing with transactions and undo
+# Unicode text editing with transactions, undo and dirty tracking
 
-A pure-Buoy document model for an IDE, code editor or refactoring tool. It connects
+A source-only document model for an IDE, code editor or refactoring tool. It connects
 UTF-8 byte offsets used by parsers with UTF-16 positions used by an LSP client,
 and groups text changes into atomic operations with undo/redo and dirty tracking.
 
@@ -21,7 +21,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import editorkit
 
 Sub Main()
@@ -58,7 +58,6 @@ On your own machine, install Buoy and run:
 buoy ai init --both
 ```
 
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 

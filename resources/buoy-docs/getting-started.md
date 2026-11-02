@@ -15,7 +15,7 @@ Copy `editorkit-0.1.0.buipkg` into the consumer's `packages/` directory and impo
 
 Convert externally supplied positions through the document before constructing byte edits. This example replaces one emoji, then restores the initial saved text with undo.
 
-```buoy
+```basic
 Import editorkit
 
 Sub Main()

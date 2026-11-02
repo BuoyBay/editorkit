@@ -1,4 +1,4 @@
-# Unicode text document — transactions, undo, dirty tracking
+# Unicode editor with undo
 
 A source-only document model for an IDE, code editor or refactoring tool. It connects
 UTF-8 byte offsets used by parsers with UTF-16 positions used by an LSP client,

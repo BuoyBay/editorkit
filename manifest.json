@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "editorkit",
   "version": "0.1.0",
-  "description": "Unicode document positions, atomic text edits, bounded undo/redo and dirty tracking for developer tools"
+  "description": "Unicode text editing with transactions, undo and dirty tracking"
 }
